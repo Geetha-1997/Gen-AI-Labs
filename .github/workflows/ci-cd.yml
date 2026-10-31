@@ -1,4 +1,3 @@
-```yaml
 name: Gen-AI-Labs CI/CD
 
 on:
@@ -123,4 +122,3 @@ jobs:
 
           kubectl -n gen-ai-labs rollout status deployment/gen-ai-labs-api --timeout=300s
           kubectl -n gen-ai-labs rollout status deployment/gen-ai-labs-web --timeout=300s
-```
