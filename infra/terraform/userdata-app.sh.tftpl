@@ -1,0 +1,40 @@
+#!/bin/bash
+set -euo pipefail
+exec > >(tee /var/log/genai-bootstrap.log | logger -t genai-bootstrap -s 2>/dev/console) 2>&1
+
+dnf update -y
+dnf install -y docker jq
+systemctl enable --now docker
+aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${backend_repo}
+mkdir -p /opt/genai
+chmod 700 /opt/genai
+APP_SECRET=$(aws secretsmanager get-secret-value --region ${region} --secret-id '${app_secret}' --query SecretString --output text)
+DB_SECRET=$(aws secretsmanager get-secret-value --region ${region} --secret-id '${db_secret}' --query SecretString --output text)
+JWT_SECRET=$(printf '%s' "$APP_SECRET" | jq -r .JWT_SECRET)
+GROQ_API_KEY=$(printf '%s' "$APP_SECRET" | jq -r .GROQ_API_KEY)
+GROQ_MODEL=$(printf '%s' "$APP_SECRET" | jq -r .GROQ_MODEL)
+DB_PASSWORD=$(printf '%s' "$DB_SECRET" | jq -r .password)
+cat >/opt/genai/backend.env <<ENV
+ENVIRONMENT=production
+JWT_SECRET=$JWT_SECRET
+GROQ_API_KEY=$GROQ_API_KEY
+GROQ_MODEL=$GROQ_MODEL
+DATABASE_URL=postgresql+psycopg://${db_user}:$DB_PASSWORD@${db_host}:5432/${db_name}
+CORS_ORIGINS=${app_origin}
+ENV
+chmod 600 /opt/genai/backend.env
+# The initial ECR image must be published before the full Terraform apply.
+if ! docker pull ${backend_repo}:${image_tag}; then
+  echo "Initial backend image is not available; publish it and rerun the deployment workflow."
+  exit 0
+fi
+# Wait for RDS to accept connections before applying migrations.
+DB_READY=false
+for attempt in $(seq 1 30); do
+  if docker run --rm --env-file /opt/genai/backend.env ${backend_repo}:${image_tag} python -c "from sqlalchemy import create_engine,text; from app.config import settings; e=create_engine(settings.database_url); c=e.connect(); c.execute(text('SELECT 1')); c.close()"; then DB_READY=true; break; fi
+  sleep 10
+done
+if [ "$DB_READY" != "true" ]; then echo "Database did not become ready"; exit 1; fi
+docker run --rm --env-file /opt/genai/backend.env ${backend_repo}:${image_tag} alembic upgrade head
+docker rm -f genai-api || true
+docker run -d --name genai-api --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=${region} --log-opt awslogs-group=${log_group} --log-opt awslogs-stream=api-$(hostname) --env-file /opt/genai/backend.env -p 8000:8000 ${backend_repo}:${image_tag}

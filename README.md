@@ -1,285 +1,205 @@
 # Gen-AI-Labs
 
-A ChatGPT-style AI workspace built with React + TypeScript, FastAPI, PostgreSQL and Groq inference. Designed for Docker and Amazon EKS deployment.
+A ChatGPT-style AI workspace built with React + TypeScript, FastAPI, PostgreSQL and Groq inference. The primary AWS deployment path in this repository is Terraform-managed EC2 Auto Scaling behind public/internal Application Load Balancers. Kubernetes manifests are retained as an optional EKS learning path; they are not deployed by the EC2 Terraform stack.
 
-> **Provider clarification:** Groq and xAI are different providers with different API keys and endpoints. This implementation uses the Groq API as the configured primary provider. The xAI key setting is reserved for a future provider adapter; it is not used by the Groq client. Do not put either key in browser code.
+## Features
 
-## Capabilities
-
-- Email/password registration and login; JWT-protected API routes.
-- Per-user conversation history and persisted user/assistant messages.
-- Multi-turn context (most recent 30 messages supplied to the model).
-- Groq Chat Completions API with server-sent event streaming.
-- PostgreSQL persistence and Alembic schema migrations.
-- Responsive dark React chat interface, conversation creation/deletion, streaming composer.
-- Docker Compose local environment; non-root frontend/backend images.
-- Kubernetes Deployment/Service/Ingress/HPA/PDB manifests; AWS ALB HTTPS ingress.
-- GitHub Actions tests, ECR image publishing and EKS rollout using GitHub OIDC.
+- Email/password registration and JWT-protected API routes.
+- User-owned conversations and PostgreSQL message persistence.
+- Groq Chat Completions streaming over Server-Sent Events.
+- Alembic database migrations.
+- Docker Compose local environment.
+- Terraform for a dedicated two-AZ AWS VPC, ALBs, EC2 Auto Scaling, SSM-only Bastion, ECR, RDS PostgreSQL Multi-AZ, Secrets Manager, least-privilege IAM, optional Route 53/ACM and CloudWatch alarms/logs.
+- GitHub Actions CI for backend tests with coverage, frontend unit tests/build, Trivy source and container-image scans, and optional SonarQube analysis.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-  U[Browser] --> R53[Route 53 DNS]
-  R53 --> ALB[ALB + ACM HTTPS]
-  ALB --> WEB[React / Nginx on EKS]
-  ALB --> API[FastAPI on EKS]
-  WEB -->|/api same-origin| API
-  API --> DB[(PostgreSQL / Amazon RDS)]
-  API --> GROQ[Groq Chat Completions API]
-  GH[GitHub Actions] -->|OIDC short-lived role| AWS[AWS IAM]
-  GH --> ECR[ECR repositories]
-  ECR --> EKS[EKS deployments]
-  EKS --> CW[CloudWatch Container Insights]
+  User[Browser] --> DNS[Route 53 optional]
+  DNS --> PublicALB[Public ALB / HTTPS with ACM]
+  PublicALB --> WebASG[2 x Nginx + React EC2 web ASG]
+  WebASG --> InternalALB[Internal ALB]
+  InternalALB --> AppASG[2 x FastAPI EC2 app ASG]
+  AppASG --> RDS[(Encrypted RDS PostgreSQL Multi-AZ)]
+  AppASG --> Groq[Groq API]
+  Bastion[Bastion / SSM admin access] -. admin only .-> AppASG
+  GitHub[GitHub Actions / manual deploy script] --> ECR[ECR image repositories]
+  ECR --> WebASG
+  ECR --> AppASG
+  AWS[CloudWatch alarms] --> Ops[Operations]
 ```
 
-## Local development
+The Terraform stack creates a new VPC and does not modify existing VPCs in your account. It creates four application/web EC2 instances at desired capacity (two web + two app), plus one Bastion EC2 instance. Auto Scaling starts with two instances per tier and can scale to four per tier at 50% average CPU. This can raise costs; review the plan and budget before applying.
 
-### Prerequisites
+## Local run (Windows PowerShell)
 
-- Docker Engine + Docker Compose v2
-- A Groq API key from [Groq Console](https://console.groq.com/keys)
+Prerequisites: Docker Desktop with Compose v2, and a Groq API key from [Groq Console](https://console.groq.com/keys).
 
-### Start
-
-```bash
-cp .env.example .env
-# Edit .env: set GROQ_API_KEY and a unique JWT_SECRET (32+ random bytes)
+```powershell
+Copy-Item .env.example .env
+# Edit .env: set GROQ_API_KEY and a unique JWT_SECRET (32+ random bytes).
 docker compose up --build -d
-```
-
-Open:
-- Web app: http://localhost:8080
-- API OpenAPI docs: http://localhost:8000/docs
-- Liveness: http://localhost:8000/health/live
-- Readiness: http://localhost:8000/health/ready
-
-The first backend boot does not create tables. Run the migration once after PostgreSQL is healthy:
-
-```bash
 docker compose exec backend alembic upgrade head
 ```
 
-Then register an account in the UI. To inspect logs: `docker compose logs -f backend`.
+Open:
+- Web app: http://localhost:8081
+- API docs: http://localhost:8000/docs
+- Liveness: http://localhost:8000/health/live
+- Readiness: http://localhost:8000/health/ready
 
-### Run without Docker
+Keep the local PostgreSQL volume: do not use `docker compose down -v` unless you intentionally want to delete local database data.
 
-```bash
-# PostgreSQL must be running and DATABASE_URL configured.
-cd backend
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-alembic upgrade head
-uvicorn app.main:app --reload --port 8000
+## Project layout
+
+```text
+backend/                 FastAPI, SQLAlchemy, Alembic and tests
+frontend/                React + TypeScript + Vite + Nginx
+database/                Database operations and local backup helper
+infra/terraform/         AWS EC2/RDS/VPC infrastructure
+infra/k8s/               Optional EKS Kubernetes manifests
+infra/aws/               GitHub OIDC trust and deploy policy templates
+scripts/                 Local and AWS deployment scripts
+.github/workflows/       CI pipeline
 ```
 
-In another terminal:
+Alembic migrations stay in `backend/alembic`; `database/` is for operational documentation and backup scripts, not a second migration source.
 
-```bash
-cd frontend
-npm install
-# VITE_API_URL defaults to same-origin. For Vite dev server use:
-# Windows PowerShell: $env:VITE_API_URL='http://localhost:8000'
-# macOS/Linux: VITE_API_URL=http://localhost:8000 npm run dev
-npm run dev
+## Code quality, testing and security scanning
+
+The GitHub Actions workflow `.github/workflows/ci-cd.yml` runs on pull requests and pushes to `main`. It performs:
+
+1. Backend Python compilation and `pytest` tests with coverage.
+2. Frontend Vitest unit tests and a TypeScript/Vite production build.
+3. Trivy filesystem scanning for dependency vulnerabilities, infrastructure misconfigurations and exposed secrets.
+4. Docker builds for backend and frontend, followed by Trivy image vulnerability scans.
+5. SonarQube static analysis when its connection settings are configured.
+
+### Configure SonarQube for GitHub Actions
+
+Create a project in your SonarQube server (or SonarQube Cloud) with project key `gen-ai-labs`, generate a project analysis token, then configure these GitHub repository settings:
+
+- Repository secret `SONAR_TOKEN`: the analysis token.
+- Repository variable `SONAR_HOST_URL`: your reachable SonarQube server URL (for example, `https://sonar.example.com`).
+
+The scan is intentionally skipped when these values are absent; the other CI and Trivy checks still run. A GitHub-hosted runner cannot reach a SonarQube server running only on your laptop. Use a reachable hosted server or a properly secured self-hosted runner. Do not expose an unauthenticated SonarQube server to the public internet.
+
+### Run SonarQube locally (optional)
+
+The local SonarQube service is behind the `quality` Compose profile and does not start during the normal app startup. It is for local evaluation only; use a properly configured external database and secured server for shared/production SonarQube.
+
+```powershell
+docker compose --profile quality up -d sonarqube
+# Wait for http://localhost:9000 to become ready, then sign in and create a project/token.
+$env:SONAR_TOKEN = '<project-analysis-token>'
+docker run --rm -e SONAR_HOST_URL='http://host.docker.internal:9000' -e SONAR_TOKEN=$env:SONAR_TOKEN -v "${PWD}:/usr/src" sonarsource/sonar-scanner-cli
 ```
 
-## Configuration
+Default local SonarQube credentials should be changed immediately after first login. Stop the optional service when finished with `docker compose --profile quality stop sonarqube`.
 
-| Variable | Required | Description |
-|---|---:|---|
-| `GROQ_API_KEY` | Yes | Groq API secret; backend only |
-| `GROQ_MODEL` | No | Defaults to `openai/gpt-oss-120b`; verify model availability in Groq Console |
-| `DATABASE_URL` | Yes | SQLAlchemy PostgreSQL URL using psycopg driver |
-| `JWT_SECRET` | Yes | Random signing secret; use Secrets Manager in production |
-| `JWT_ALGORITHM` | No | Defaults to HS256 |
-| `ACCESS_TOKEN_MINUTES` | No | Defaults to 60 |
-| `CORS_ORIGINS` | No | Comma-separated trusted browser origins |
-| `XAI_API_KEY` | No | Reserved for separate xAI adapter; currently unused |
-| `VITE_API_URL` | No | Frontend API origin; blank for same-origin ALB routing |
+### Run tests and scans locally (Windows PowerShell)
 
-Never use the sample local JWT secret in a deployed environment. Never prefix a secret with `VITE_`: Vite variables are bundled into public browser assets.
+```powershell
+Push-Location backend
+python -m pip install -r requirements.txt
+python -m compileall -q app tests
+python -m pytest -q --cov=app --cov-report=xml:coverage.xml
+Pop-Location
 
-## Tests and validation
-
-```bash
-cd backend
-pip install -r requirements.txt
-python -m compileall -q app
-python -m pytest -q
-cd ../frontend
+Push-Location frontend
 npm ci
+npm test
 npm run build
+Pop-Location
+
+# Install Trivy separately, then run from the repository root:
+trivy fs --scanners vuln,misconfig,secret --severity HIGH,CRITICAL --ignore-unfixed .
 ```
 
-The backend tests currently cover password hashing/verification and JWT subject encoding. Add integration tests against an ephemeral PostgreSQL instance and mocked Groq transport before production sign-off. CI runs backend unit tests and frontend production compilation before publishing images.
+Trivy image scans are run by CI after both Docker images have been built. A HIGH/CRITICAL finding fails the security job; fix or formally assess the finding rather than disabling the scanner.
 
-## AWS deployment (operator-run)
+`.github/workflows/deploy-aws.yml` is a separate manual deployment workflow; it uses GitHub OIDC, pushes images to ECR, applies Alembic migrations once and rolls out EC2 containers sequentially through SSM. Configure the `production` GitHub Environment with secret `AWS_DEPLOY_ROLE_ARN` and variable `AWS_REGION=ap-south-1`. Create the AWS OIDC provider and role using `infra/aws/oidc-trust-policy.json` and `infra/aws/github-deploy-policy.json` after replacing `AWS_ACCOUNT_ID`. Restrict the role to this repository and protect the environment with required reviewers.
 
-The AWS account, region, domain, EKS cluster, ACM certificate and GitHub repository are environment-specific. No AWS account credentials were supplied to this build, so **no AWS resources have been created and no deployment is claimed**.
+## AWS deployment (manual, operator-controlled)
 
-### 1. Provision AWS foundation
+Target region: `ap-south-1` (Mumbai), AZs `ap-south-1a` and `ap-south-1b`. The stack uses two NAT Gateways, two ALBs, four EC2 application/web instances, one Bastion, and Multi-AZ RDS. These are paid resources and can be expensive even when idle.
 
-Use an approved IaC baseline (Terraform or AWS CDK) to create:
+### Prerequisites
 
-- VPC across at least two Availability Zones, public/private subnets, route tables and security groups.
-- EKS cluster and managed node group(s) in private subnets. Use supported Kubernetes/EKS versions and a supported node AMI.
-- ECR repositories `gen-ai-labs-api` and `gen-ai-labs-web`, with image scanning, immutable release tags and lifecycle retention.
-- Amazon RDS for PostgreSQL in private subnets, encryption at rest, automated backups and deletion protection. Do not run production PostgreSQL as a single pod.
-- ACM public certificate for `app.example.com` in the ALB region.
-- Route 53 hosted zone and DNS alias to the ALB after Ingress provisions it.
-- CloudWatch Container Insights/log groups, alarms, retention and SNS notifications.
+- AWS CLI v2 authenticated to the intended account; verify with `aws sts get-caller-identity`.
+- Terraform >= 1.6, Docker Desktop, Git, PowerShell 7 recommended.
+- AWS Systems Manager Session Manager access for the Bastion; the Terraform security group does not open inbound SSH.
+- For HTTPS and custom DNS: an ACM certificate validated in `ap-south-1` and an existing Route 53 hosted zone. Without a certificate the ALB is HTTP only.
+- A Groq API key and a random JWT signing secret. Never commit these values.
 
-### 2. Configure EKS add-ons
+### Provision infrastructure
 
-Install/configure the AWS Load Balancer Controller with its own least-privilege IRSA role and service account. Follow the official AWS procedure; do not reuse the application's IAM role. Install Metrics Server for HPA. Configure node autoscaling using **Karpenter (recommended for new deployments)** or Cluster Autoscaler; provision its own IAM permissions and interruption handling. `infra/k8s/karpenter-nodepool.yaml` provides a starting EC2NodeClass/NodePool template; replace the cluster tags and node role, and validate against the installed Karpenter CRDs before applying. The included HPA will not scale without resource metrics.
-
-Official references:
-- [EKS AWS Load Balancer Controller](https://docs.aws.amazon.com/eks/latest/userguide/aws-load-balancer-controller.html)
-- [Install Load Balancer Controller with Helm](https://docs.aws.amazon.com/eks/latest/userguide/lbc-helm.html)
-- [EKS security best practices](https://docs.aws.amazon.com/eks/latest/best-practices/security.html)
-- [EKS cluster autoscaling best practices](https://docs.aws.amazon.com/eks/latest/best-practices/cluster-autoscaling/)
-
-### 3. Create secrets
-
-Recommended: AWS Secrets Manager + External Secrets Operator (ESO) with IRSA. Store `database-url`, `jwt-secret`, and `groq-api-key` in Secrets Manager and configure an ESO `SecretStore`/`ExternalSecret` to materialize Kubernetes Secret `gen-ai-labs-secrets` in namespace `gen-ai-labs`.
-
-For a short-lived test only, create the Kubernetes secret interactively (avoid shell history and CI logs):
-
-```bash
-kubectl create namespace gen-ai-labs
-kubectl -n gen-ai-labs create secret generic gen-ai-labs-secrets \
-  --from-literal=database-url='postgresql+psycopg://USER:PASSWORD@RDS_ENDPOINT:5432/genai' \
-  --from-literal=jwt-secret='GENERATE_A_LONG_RANDOM_VALUE' \
-  --from-literal=groq-api-key='GROQ_SECRET'
+```powershell
+Set-Location infra/terraform
+Copy-Item .\terraform.tfvars.example .\terraform.tfvars
+# Edit terraform.tfvars only if you are using a custom domain and ACM certificate.
+# For a custom domain, also set domain_name, hosted_zone_id and acm_certificate_arn.
+$env:TF_VAR_jwt_secret = '<strong-random-32+-byte-secret>'
+$env:TF_VAR_groq_api_key = '<Groq-key>'
+# Optional: omit TF_VAR_db_password to let Terraform generate the RDS password.
+terraform init
+terraform fmt -recursive
+terraform validate
+# Create only ECR repositories first so images exist before EC2 boots.
+terraform plan -target=aws_ecr_repository.backend -target=aws_ecr_repository.frontend -target=aws_ecr_lifecycle_policy.backend -target=aws_ecr_lifecycle_policy.frontend -out=ecr-bootstrap.tfplan
+terraform show ecr-bootstrap.tfplan
+terraform apply ecr-bootstrap.tfplan
+Set-Location ../..
+.\scripts\push-images-bootstrap.ps1 -Region ap-south-1
+Set-Location infra/terraform
+terraform plan -out=tfplan
+terraform show tfplan
+# Review every resource and cost before proceeding.
+terraform apply tfplan
 ```
 
-Do not commit `secrets.template.yaml` with real values or pass credentials as command-line arguments in shared environments.
+**State security:** Terraform state contains sensitive values. Before production/shared use, run `scripts/bootstrap-tfstate.ps1`, copy `infra/terraform/backend.tf.example` to `backend.tf`, replace the printed bucket name and run `terraform init -migrate-state`. Never commit state or plan files. Do not store secret values in `terraform.tfvars`.
 
-### 4. Build and push images
+### Build, publish and deploy application images
 
-```bash
-export AWS_REGION=ap-south-1
-export AWS_ACCOUNT_ID=123456789012
-export REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
-aws ecr create-repository --repository-name gen-ai-labs-api --region "$AWS_REGION"
-aws ecr create-repository --repository-name gen-ai-labs-web --region "$AWS_REGION"
-aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
-docker build -t "$REGISTRY/gen-ai-labs-api:initial" ./backend
-docker build --build-arg VITE_API_URL= --build-arg VITE_MODEL_NAME=Llama -t "$REGISTRY/gen-ai-labs-web:initial" ./frontend
-docker push "$REGISTRY/gen-ai-labs-api:initial"
-docker push "$REGISTRY/gen-ai-labs-web:initial"
+After the initial ECR bootstrap and image push, and after the full Terraform apply creates ASGs and SSM-managed instances, return to the repository root and run:
+
+```powershell
+Set-Location ../..
+.\scripts\deploy-aws.ps1 -Region ap-south-1
 ```
 
-### 5. Configure GitHub OIDC
+The script builds both images, pushes a Git commit tag plus the `current` tag, runs the Alembic migration on one app instance using SSM, then updates app and web instances sequentially. Alternatively, after configuring GitHub OIDC, use the manual `Deploy to AWS` workflow. Check SSM command results and ALB target health before declaring success. Both paths require ECR/SSM permissions and running EC2 instances registered with Systems Manager.
 
-Create the GitHub OIDC provider `token.actions.githubusercontent.com` if absent. Create a deploy role using `infra/aws/oidc-trust-policy.json`, replacing account and repository placeholders. Restrict `sub` to the exact repository and protected deployment branch/environment. Attach a least-privilege policy based on `infra/aws/github-deploy-policy.json`; scope ECR to the two repositories and EKS to the target cluster. Configure the EKS access entry/RBAC mapping so the role can update only the intended namespace/deployments.
+### Verify
 
-Set GitHub repository/environment configuration:
-
-- Variable `AWS_REGION`
-- Variable `EKS_CLUSTER_NAME`
-- Secret `AWS_DEPLOY_ROLE_ARN`
-- Protect the `production` environment with required reviewers and branch restrictions.
-
-The workflow uses OIDC and does not require long-lived AWS access keys. Its trust-policy subject must match the `production` GitHub Environment configured in the workflow. The workflow runs the migration Job before updating the application Deployments; use backward-compatible expand/contract migrations.
-
-### 6. Deploy manifests and migrate database
-
-Replace all placeholders in `infra/k8s/*.yaml`: account ID, region, ACM certificate ARN, hostname and image references. Ensure `CORS_ORIGINS` matches the real HTTPS site. Apply in order:
-
-```bash
-aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
-kubectl apply -f infra/k8s/namespace.yaml
-kubectl apply -f infra/k8s/backend.yaml
-kubectl apply -f infra/k8s/frontend.yaml
-kubectl apply -f infra/k8s/autoscaling.yaml
-# After Karpenter is installed and cluster-specific tags/role are set:
-# kubectl apply -f infra/k8s/karpenter-nodepool.yaml
-kubectl apply -f infra/k8s/ingress.yaml
+```powershell
+aws elbv2 describe-target-health --target-group-arn <web-target-group-arn> --region ap-south-1
+aws autoscaling describe-auto-scaling-groups --region ap-south-1
+aws ssm describe-instance-information --region ap-south-1
 ```
 
-Run the migration Job template after replacing the image placeholder with the exact backend image tag:
+Use the Terraform output `public_alb_url`. For HTTPS, confirm the ACM certificate is attached and HTTP redirects to HTTPS. Test registration, login, conversation persistence, streaming, cross-user access isolation, database backups and recovery.
 
-```bash
-sed "s|AWS_ACCOUNT_ID.dkr.ecr.AWS_REGION.amazonaws.com/gen-ai-labs-api:latest|$REGISTRY/gen-ai-labs-api:initial|" infra/k8s/migration-job.yaml > /tmp/gen-ai-labs-migration.yaml
-kubectl -n gen-ai-labs delete job gen-ai-labs-migrate --ignore-not-found=true
-kubectl apply -f /tmp/gen-ai-labs-migration.yaml
-kubectl -n gen-ai-labs wait --for=condition=complete job/gen-ai-labs-migrate --timeout=300s
-```
+## Database operations
 
-Then verify:
+- Production database: encrypted RDS PostgreSQL Multi-AZ with seven-day automated backup retention and deletion protection.
+- Schema migration source: `backend/alembic`. Deployment applies migrations before restarting API containers.
+- Local backup helper: `database/scripts/backup-local.ps1`. Store backups encrypted and outside Git.
+- Test point-in-time restore and snapshot restore in a separate environment before production sign-off.
 
-```bash
-kubectl -n gen-ai-labs get pods,svc,ingress,hpa,pdb
-kubectl -n gen-ai-labs rollout status deploy/gen-ai-labs-api
-kubectl -n gen-ai-labs rollout status deploy/gen-ai-labs-web
-kubectl -n gen-ai-labs get ingress gen-ai-labs -o wide
-```
+## Security and production readiness
 
-Create a Route 53 A/AAAA alias to the ALB DNS name/hosted zone ID once provisioned. Test HTTPS, DNS, certificate chain, auth, persistence, streaming and cross-user access isolation.
+This is a production-oriented deployment scaffold, **not a verified production service**. The supplied source still requires a security review and additional controls before public customer use: HttpOnly Secure SameSite session cookies and CSRF protection (the current frontend stores JWT in localStorage), rate limiting/WAF, account recovery and email verification, audit logging, dependency/image scanning, load tests, disaster-recovery drills, and restore/failover testing.
 
+- Never commit `.env`, credentials, Terraform state, database dumps or real customer data.
+- Rotate any API key that has been included in an archive or shared outside its secret manager.
+- RDS has no public access; security groups permit PostgreSQL only from the app tier.
+- EC2 uses IMDSv2 and encrypted EBS. Use Secrets Manager for application/database secrets.
+- Restrict Bastion SSH to your `/32`; SSM Session Manager is preferred.
+- Configure an AWS Budget alert. A budget is an alert, not a spending cap or automatic shutdown.
 
-### 7. CI/CD behavior
+## Optional Kubernetes path
 
-Pull requests run Python tests and frontend build. A push to `main` after tests assumes the configured GitHub OIDC role, builds and pushes immutable SHA tags to ECR, runs the checked-in migration Job, updates both Deployments and waits for rollout. Protect the `production` environment with reviewer approval and branch restrictions. Use backward-compatible expand/contract migrations.
-
-## Security and operational controls
-
-- API keys remain server-side in environment variables/Secrets Manager; never expose them to Vite/browser code.
-- HTTPS termination at ALB/ACM; restrict ingress and database security groups. RDS accepts PostgreSQL only from application/node security groups.
-- JWT expiry, bcrypt password hashes, ownership-scoped conversation queries, input length bounds, non-root images, read-only root filesystems and dropped Linux capabilities.
-- Kubernetes resource requests/limits, readiness/liveness probes, HPA and PDB.
-- Enable ECR image scanning, dependency scanning, branch protection, secret scanning and signed/provenance-attested builds as an operational hardening step.
-- Configure API rate limiting/WAF, account lockout or throttling, email verification, password reset, refresh-token rotation and HttpOnly Secure SameSite cookies before public launch. The current demo stores the access token in browser localStorage; this is not the preferred production session design.
-- Add audit events with request IDs; do not log prompts, passwords, tokens, API keys or database URLs. Configure CloudWatch retention and alarms for 5xx, latency, pod restarts, CPU/memory, RDS storage/connections and ALB target health.
-- Enable RDS automated backups (e.g. 7–35 day retention per policy), point-in-time recovery, encryption with KMS, snapshots before schema changes and periodic restore drills. Define RPO/RTO with the service owner.
-- Use a database connection pool budget aligned to maximum API replicas and RDS connection limits. Consider PgBouncer/RDS Proxy at scale.
-
-## Monitoring, backup and rollback
-
-```bash
-kubectl -n gen-ai-labs logs deploy/gen-ai-labs-api --since=30m
-kubectl -n gen-ai-labs describe pods
-kubectl -n gen-ai-labs get hpa
-kubectl -n gen-ai-labs rollout history deploy/gen-ai-labs-api
-./scripts/rollback.sh
-```
-
-Rollback reverts application Deployments to the previous ReplicaSet. It does **not** reverse database migrations. Use backward-compatible migrations; restore from a verified RDS snapshot/PITR only under an approved incident procedure. Keep the last known-good ECR image tag and deployment manifest revision.
-
-## Troubleshooting
-
-| Symptom | Check |
-|---|---|
-| `GROQ_API_KEY is not configured` | Secret name/key, pod env, ESO sync status; restart deployment after secret rotation |
-| Groq 401/429/5xx | Key validity, model availability, quota/rate limits, provider status; inspect sanitized API error logs |
-| API readiness 503 | `DATABASE_URL`, RDS SG/NACL/routes, TLS mode, DB credentials, migrations |
-| HPA `<unknown>` | Metrics Server, resource requests, `kubectl top pods` |
-| Ingress pending | AWS Load Balancer Controller logs, subnet tags, IAM/IRSA, ACM region and security groups |
-| HTTPS/DNS failure | ACM domain validation, Ingress certificate ARN, Route 53 alias, ALB listener/target health |
-| Streaming appears buffered | ALB idle timeout, proxy buffering, client network; response includes `X-Accel-Buffering: no` |
-| Pods crash with permission errors | Container UID, writable Nginx runtime mounts, Kubernetes security context |
-
-## Cost planning (indicative, not a quote)
-
-Illustrative small production footprint in a common AWS commercial region, 730 hours/month, two modest worker nodes, one ALB, managed PostgreSQL, modest logs/egress. Actual prices depend materially on region, instance family, storage, NAT traffic, requests, HA and support. Validate with the [AWS Pricing Calculator](https://calculator.aws/).
-
-| Component | Rough monthly planning range (USD) |
-|---|---:|
-| EKS control plane | $73 |
-| 2 worker nodes | $60–$180 |
-| ALB + LCU usage | $20–$60 |
-| NAT gateways / data processing | $35–$120+ |
-| RDS PostgreSQL | $40–$180+ |
-| EBS, snapshots, S3 backups | $10–$40 |
-| CloudWatch logs/metrics/alarms | $10–$50+ |
-| Route 53 hosted zone/queries | $1–$5+ |
-| **Indicative AWS total** | **$249–$708+ / month** |
-
-Groq inference is separate and usage-based according to selected model/input/output tokens and current plan/rates. Consult [Groq pricing](https://groq.com/pricing/) before launch; do not assume a free tier or fixed token rate. xAI charges separately if enabled later; see [xAI API pricing](https://docs.x.ai/docs). Add WAF, multi-AZ NAT, production HA, support, backups and higher throughput to a full production estimate. Cost estimate excludes engineering and taxes.
-
-## Project status
-
-See [`STATUS.md`](STATUS.md) for generated files, validation evidence, environment blockers and the operator checklist. No AWS deployment is performed automatically by this repository generation.
+`infra/k8s/` contains starter Deployment, Service, Ingress, HPA, migration and Karpenter manifests for a separate EKS deployment. They are not part of the EC2 Terraform deployment and require an EKS cluster, AWS Load Balancer Controller, Metrics Server, Karpenter/managed node group, secrets integration and separate IAM/RBAC setup. Do not deploy the EC2 and EKS paths simultaneously unless you intentionally want two independent environments and understand the additional cost.

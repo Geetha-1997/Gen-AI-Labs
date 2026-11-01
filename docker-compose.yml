@@ -2,6 +2,7 @@
 services:
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: genailabs
       POSTGRES_USER: genai
@@ -16,7 +17,9 @@ services:
 
   backend:
     build: ./backend
+    restart: unless-stopped
     environment:
+      ENVIRONMENT: development
       DATABASE_URL: ${DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET}
       GROQ_API_KEY: ${GROQ_API_KEY:?Set GROQ_API_KEY in .env}
@@ -29,6 +32,7 @@ services:
         condition: service_healthy
 
   frontend:
+    restart: unless-stopped
     build:
       context: ./frontend
       args:
@@ -38,5 +42,21 @@ services:
     depends_on:
         backend:
           condition: service_healthy
+  sonarqube:
+    image: sonarqube:community
+    profiles: ["quality"]
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+
 volumes:
   postgres_data:
+  sonarqube_data:
+  sonarqube_extensions:
+  sonarqube_logs:

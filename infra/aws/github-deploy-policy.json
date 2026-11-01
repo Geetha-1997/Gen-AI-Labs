@@ -2,7 +2,9 @@
   "Version": "2012-10-17",
   "Statement": [
     {"Sid":"ECRAuth","Effect":"Allow","Action":["ecr:GetAuthorizationToken"],"Resource":"*"},
-    {"Sid":"ECRPush","Effect":"Allow","Action":["ecr:BatchCheckLayerAvailability","ecr:CompleteLayerUpload","ecr:InitiateLayerUpload","ecr:PutImage","ecr:UploadLayerPart","ecr:DescribeRepositories"],"Resource":["arn:aws:ecr:AWS_REGION:AWS_ACCOUNT_ID:repository/gen-ai-labs-api","arn:aws:ecr:AWS_REGION:AWS_ACCOUNT_ID:repository/gen-ai-labs-web"]},
-    {"Sid":"EKSDescribe","Effect":"Allow","Action":["eks:DescribeCluster"],"Resource":"arn:aws:eks:AWS_REGION:AWS_ACCOUNT_ID:cluster/REPLACE_CLUSTER_NAME"}
+    {"Sid":"ECRPush","Effect":"Allow","Action":["ecr:BatchCheckLayerAvailability","ecr:CompleteLayerUpload","ecr:InitiateLayerUpload","ecr:PutImage","ecr:UploadLayerPart","ecr:DescribeRepositories"],"Resource":["arn:aws:ecr:ap-south-1:AWS_ACCOUNT_ID:repository/gen-ai-labs-api","arn:aws:ecr:ap-south-1:AWS_ACCOUNT_ID:repository/gen-ai-labs-web"]},
+    {"Sid":"ReadInstancesAndCommands","Effect":"Allow","Action":["ec2:DescribeInstances","ssm:DescribeInstanceInformation","ssm:GetCommandInvocation","ssm:ListCommandInvocations"],"Resource":"*"},
+    {"Sid":"AllowRunShellScriptDocument","Effect":"Allow","Action":["ssm:SendCommand"],"Resource":"arn:aws:ssm:ap-south-1::document/AWS-RunShellScript"},
+    {"Sid":"DeployOnlyProjectInstances","Effect":"Allow","Action":["ssm:SendCommand"],"Resource":"arn:aws:ec2:ap-south-1:*:instance/*","Condition":{"StringEquals":{"ssm:resourceTag/Project":"gen-ai-labs"}}}
   ]
 }

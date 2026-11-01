@@ -1,0 +1,104 @@
+name: Gen-AI-Labs Deploy to AWS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: gen-ai-labs-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build, migrate and deploy
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push immutable SHA and current tags
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker build -t "$REGISTRY/gen-ai-labs-api:$IMAGE_TAG" -t "$REGISTRY/gen-ai-labs-api:current" ./backend
+          docker build --build-arg VITE_API_URL= --build-arg VITE_MODEL_NAME=Llama \
+            -t "$REGISTRY/gen-ai-labs-web:$IMAGE_TAG" -t "$REGISTRY/gen-ai-labs-web:current" ./frontend
+          docker push "$REGISTRY/gen-ai-labs-api:$IMAGE_TAG"
+          docker push "$REGISTRY/gen-ai-labs-api:current"
+          docker push "$REGISTRY/gen-ai-labs-web:$IMAGE_TAG"
+          docker push "$REGISTRY/gen-ai-labs-web:current"
+
+      - name: Run database migration and roll out instances sequentially
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          wait_ssm() {
+            local command_id="$1" instance_id="$2" status=""
+            for attempt in $(seq 1 120); do
+              status=$(aws ssm get-command-invocation --region "$AWS_REGION" --command-id "$command_id" --instance-id "$instance_id" --query Status --output text 2>/dev/null || true)
+              case "$status" in
+                Success) return 0 ;;
+                Failed|Cancelled|TimedOut|Cancelling)
+                  aws ssm get-command-invocation --region "$AWS_REGION" --command-id "$command_id" --instance-id "$instance_id" --output json || true
+                  return 1 ;;
+              esac
+              sleep 5
+            done
+            echo "Timed out waiting for SSM command $command_id on $instance_id" >&2
+            return 1
+          }
+          mapfile -t APP_IDS < <(aws ec2 describe-instances --region "$AWS_REGION" \
+            --filters Name=tag:Project,Values=gen-ai-labs Name=tag:Role,Values=app Name=instance-state-name,Values=running \
+            --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n')
+          mapfile -t WEB_IDS < <(aws ec2 describe-instances --region "$AWS_REGION" \
+            --filters Name=tag:Project,Values=gen-ai-labs Name=tag:Role,Values=web Name=instance-state-name,Values=running \
+            --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n')
+          test "${#APP_IDS[@]}" -ge 2 || { echo 'Expected at least two running app instances'; exit 1; }
+          test "${#WEB_IDS[@]}" -ge 2 || { echo 'Expected at least two running web instances'; exit 1; }
+          LOGIN="aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REGISTRY"
+          MIGRATION="$LOGIN; docker pull $REGISTRY/gen-ai-labs-api:current; docker run --rm --env-file /opt/genai/backend.env $REGISTRY/gen-ai-labs-api:current alembic upgrade head"
+          PARAMS=$(jq -cn --arg command "$MIGRATION" '{commands:[$command]}')
+          CMD=$(aws ssm send-command --region "$AWS_REGION" --document-name AWS-RunShellScript \
+            --instance-ids "${APP_IDS[0]}" --parameters "$PARAMS" \
+            --timeout-seconds 600 --query Command.CommandId --output text)
+          wait_ssm "$CMD" "${APP_IDS[0]}"
+
+          for INSTANCE in "${APP_IDS[@]}"; do
+            PULL="docker pull $REGISTRY/gen-ai-labs-api:current"
+            REMOVE="docker rm -f genai-api || true"
+            RUN="docker run -d --name genai-api --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=/gen-ai-labs/production --log-opt awslogs-stream=api-\$(hostname) --env-file /opt/genai/backend.env -p 8000:8000 $REGISTRY/gen-ai-labs-api:current"
+            PARAMS=$(jq -cn --arg login "$LOGIN" --arg pull "$PULL" --arg remove "$REMOVE" --arg run "$RUN" '{commands:[$login,$pull,$remove,$run]}')
+            CMD=$(aws ssm send-command --region "$AWS_REGION" --document-name AWS-RunShellScript \
+              --instance-ids "$INSTANCE" --parameters "$PARAMS" \
+              --timeout-seconds 600 --query Command.CommandId --output text)
+            wait_ssm "$CMD" "$INSTANCE"
+          done
+
+          for INSTANCE in "${WEB_IDS[@]}"; do
+            PULL="docker pull $REGISTRY/gen-ai-labs-web:current"
+            REMOVE="docker rm -f genai-web || true"
+            RUN="docker run -d --name genai-web --restart unless-stopped --log-driver=awslogs --log-opt awslogs-region=$AWS_REGION --log-opt awslogs-group=/gen-ai-labs/production --log-opt awslogs-stream=web-\$(hostname) -p 8080:8080 -v /opt/genai/default.conf:/etc/nginx/conf.d/default.conf:ro $REGISTRY/gen-ai-labs-web:current"
+            PARAMS=$(jq -cn --arg login "$LOGIN" --arg pull "$PULL" --arg remove "$REMOVE" --arg run "$RUN" '{commands:[$login,$pull,$remove,$run]}')
+            CMD=$(aws ssm send-command --region "$AWS_REGION" --document-name AWS-RunShellScript \
+              --instance-ids "$INSTANCE" --parameters "$PARAMS" \
+              --timeout-seconds 600 --query Command.CommandId --output text)
+            wait_ssm "$CMD" "$INSTANCE"
+          done

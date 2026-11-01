@@ -1,50 +1,48 @@
 # Gen-AI-Labs build status
 
-**Last updated:** 2026-10-30
-**Build state:** Source and deployment scaffold generated; static syntax/configuration checks passed. Full dependency-backed tests and runtime builds are blocked by this workspace's lack of network/package registry access and Docker.
+**Build state:** Source package cleaned and deployment scaffold updated. Static source/configuration checks are recorded below. This package has not been deployed to AWS and is not certified production-ready.
 
-## Completed in workspace
+## Included
 
-- [x] React + TypeScript responsive chat interface, sign-in and registration screens.
-- [x] FastAPI application, JWT authentication, bcrypt password hashing and user-owned conversations.
-- [x] PostgreSQL SQLAlchemy models and initial Alembic migration.
+- [x] React + TypeScript chat frontend, sign-in and registration screens.
+- [x] FastAPI API, JWT authentication, bcrypt password hashing and user-owned conversations.
+- [x] PostgreSQL SQLAlchemy models and Alembic migration source (`backend/alembic`).
 - [x] Groq Chat Completions streaming adapter; API key remains backend-side.
-- [x] Dockerfiles, Docker Compose, `.env.example`, `.gitignore`.
-- [x] Kubernetes namespace, API/UI Deployments and Services, ALB Ingress, HPA, PDB, migration Job and secret template.
-- [x] Karpenter EC2NodeClass/NodePool starting template (requires cluster-specific tags/role and Karpenter installation).
-- [x] GitHub Actions workflow with AWS OIDC, ECR publishing, migration Job and EKS rollout.
-- [x] OIDC trust/policy templates, local startup and rollback scripts.
-- [x] README, Mermaid architecture, deployment, security, troubleshooting and indicative cost-planning guidance.
-- [x] Python source syntax compilation passed (`compileall`).
-- [x] Kubernetes YAML, GitHub Actions YAML and AWS JSON policy/trust files parsed successfully with local YAML/JSON parsers.
+- [x] Dockerfiles, Docker Compose and `.env.example`.
+- [x] Dedicated `database/` operational folder with local backup/restore helpers.
+- [x] Terraform EC2 architecture: dedicated two-AZ VPC, ALBs, web/app Auto Scaling Groups, SSM-only Bastion, ECR, encrypted Multi-AZ RDS, Secrets Manager, least-privilege EC2 roles, CloudWatch logs/alarms, optional Route 53/ACM and optional SNS email notifications.
+- [x] GitHub Actions CI workflow: backend pytest/coverage, frontend Vitest/build, Trivy filesystem vulnerability/misconfiguration/secret scan, Docker builds and Trivy image scans.
+- [x] SonarQube project configuration and optional CI scan (requires `SONAR_TOKEN` secret and `SONAR_HOST_URL` repository variable).
+- [x] Optional local SonarQube Community service behind Docker Compose `quality` profile.
+- [x] Optional Kubernetes manifest examples under `infra/k8s/`; these are not deployed by the EC2 Terraform stack.
+- [x] PowerShell image bootstrap and SSM rollout scripts.
+- [x] Documentation for architecture, cost review, deployment and operational limitations.
 
-## Validation attempted / failures
+## Checks completed in this workspace
 
-- [ ] `pip install -r backend/requirements.txt` could not complete: workspace DNS/network access to Python package index unavailable. Therefore pytest could not import required `bcrypt` dependency; test suite has **not** passed.
-- [ ] `npm install` timed out because npm registry access was unavailable. Frontend TypeScript/Vite build and browser tests have **not** run.
-- [ ] Docker CLI is not installed in this workspace. Docker image builds and Compose runtime/integration checks have **not** run.
-- [ ] No live Groq key supplied: provider response and streaming not tested against Groq.
-- [ ] No AWS account/region/domain/ACM certificate/EKS cluster/RDS details or deployment authorization supplied: no AWS resources provisioned and no deployment performed.
-- [ ] No GitHub repository/environment settings or deploy role supplied: OIDC authentication, ECR push and EKS workflow not executed.
-- [ ] No live Kubernetes schema validation, ingress/DNS/HTTPS, HPA/node scale-out, CloudWatch, backup/restore or rollback test has been performed.
+- [x] Python source syntax compilation (`compileall`).
+- [x] AWS IAM JSON files parsed.
+- [x] GitHub Actions and Docker Compose YAML parsed; Kubernetes multi-document YAML is retained as supplied.
+- [x] Shell syntax checked for GitHub Actions run steps and local shell scripts.
+- [x] Terraform variable references checked against declarations; HCL delimiter/string scans passed.
 
-## Remaining production work
+## Checks not completed
 
-1. Run backend tests and frontend build in an environment with registry access; fix any dependency/API/type errors.
-2. Add PostgreSQL integration tests, mocked Groq streaming tests and browser E2E tests.
-3. Validate Kubernetes resources against the target EKS/Karpenter versions (`kubectl apply --dry-run=server` and staging rollout).
-4. Provision VPC, EKS, RDS, ECR, ALB controller, Metrics Server, Karpenter, ACM, Route 53 and CloudWatch.
-5. Integrate Secrets Manager + External Secrets Operator; configure GitHub OIDC trust and restricted EKS access.
-6. Add production-grade HttpOnly cookie sessions, CSRF protections, rate limiting/WAF, account recovery, email verification, dependency/image scanning and audit controls.
-7. Test database backup/PITR restore, migration compatibility, alarms and rollback in staging.
+- [ ] Backend pytest/coverage: run in CI or a dependency-enabled environment; not executed as part of this modification.
+- [ ] Frontend Vitest tests and Vite build: run in CI or a dependency-enabled environment; not executed as part of this modification.
+- [ ] Trivy filesystem/image scans and Docker image builds: run in GitHub Actions; not executed in this workspace.
+- [ ] SonarQube analysis: configure `SONAR_TOKEN` and `SONAR_HOST_URL`; scan is skipped until configured.
+- [ ] Terraform `fmt`, `validate` and `plan`: run these locally before any apply.
+- [ ] PowerShell deployment scripts: PowerShell runtime unavailable here; review/run in Windows PowerShell 7.
+- [ ] Groq live API, AWS deployment, ALB health, RDS failover/restore, autoscaling and SNS delivery have not been tested.
 
-## Operator next steps
+## Production sign-off still required
 
-1. Copy `.env.example` to `.env`; set a Groq API key and strong random JWT secret.
-2. Run `docker compose up --build -d`, then `docker compose exec backend alembic upgrade head`.
-3. Run backend/frontend checks listed in README and manually test register/login/chat/restart persistence.
-4. Provision AWS and replace all account, region, domain, certificate, role and cluster placeholders.
-5. Configure Secrets Manager/ESO and GitHub environment variables/secrets; validate OIDC trust subject matches the `production` GitHub Environment.
-6. Deploy staging, verify HTTPS, SSE, authorization isolation, HPA/node autoscaling, CloudWatch, RDS restore and rollback.
+1. Run dependency-backed backend/frontend/Docker checks and Terraform `fmt`, `validate`, and `plan` in the target environment.
+2. Review current AWS costs. Two NAT Gateways, two ALBs, four baseline EC2 instances, Bastion and Multi-AZ RDS incur ongoing charges.
+3. Configure encrypted/versioned remote Terraform state and restrict access; local state is only a starter.
+4. Add HttpOnly Secure SameSite sessions, CSRF protections, rate limiting/WAF, account recovery, email verification, audit controls and dependency/image scanning.
+5. Fix any Trivy HIGH/CRITICAL findings and SonarQube quality-gate issues.
+6. Deploy to staging, test migrations and authorization isolation, load test, verify alarms, test RDS restore/failover, and rehearse rollback.
 
-**No test pass, live API success, AWS provisioning or deployment is claimed.**
+**No AWS resources were created, no AWS deployment was performed, and no end-to-end production test is claimed.**

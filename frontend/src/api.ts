@@ -1,3 +1,4 @@
+import { parseSseEvent } from './sse';
 const API = import.meta.env.VITE_API_URL || '';
 export type User = { id: number; email: string };
 export type Conversation = { id: number; title: string; created_at: string; updated_at: string };
@@ -24,7 +25,7 @@ export const api = {
     while (true) {
       const {value,done} = await reader.read(); if (done) break;
       buffer += decoder.decode(value,{stream:true}); const events = buffer.split('\n\n'); buffer = events.pop() || '';
-      for (const event of events) { const line = event.split('\n').find(x=>x.startsWith('data: ')); if (!line) continue; const data = JSON.parse(line.slice(6)); if (data.error) throw new Error(data.error); if (data.token) onToken(data.token); }
+      for (const event of events) { const data = parseSseEvent(event); if (!data) continue; if (data.error) throw new Error(data.error); if (data.token) onToken(data.token); }
     }
   }
 };

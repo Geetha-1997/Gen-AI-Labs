@@ -83,6 +83,7 @@ def chat(conversation_id: int, payload: ChatIn, db: Session = Depends(get_db), u
     if conversation.title == "New conversation": conversation.title = payload.content.strip()[:70]
     conversation.updated_at = datetime.now(timezone.utc)
     db.commit()
+    conversation_id = conversation.id
     history.append({"role": "user", "content": payload.content.strip()})
     # Stream generation and persist the assistant response only after successful completion.
     def generate():
@@ -93,7 +94,7 @@ def chat(conversation_id: int, payload: ChatIn, db: Session = Depends(get_db), u
                 yield "data: " + json.dumps({"token": token}) + "\n\n"
             answer = "".join(chunks)
             with __import__("contextlib").closing(__import__("app.database", fromlist=["SessionLocal"]).SessionLocal()) as session:
-                session.add(Message(conversation_id=conversation.id, role="assistant", content=answer))
+                session.add(Message(conversation_id=conversation_id, role="assistant", content=answer))
                 session.commit()
             yield "data: " + json.dumps({"done": True}) + "\n\n"
         except ProviderNotConfigured as exc:

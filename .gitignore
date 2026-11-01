@@ -1,24 +1,47 @@
+# Secrets and local environment
 .env
 .env.*
 !.env.example
+secrets/
 *.pem
 *.key
-secrets/
-*.sql
-*.dump
-*.bak
+
+# Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
 node_modules/
 dist/
 build/
+
+# IDE
 .vscode/
 .idea/
+
+# Terraform
 **/.terraform/
 *.tfstate
 *.tfstate.*
-*.tfvars
+*.tfplan
+terraform.tfvars
 !*.tfvars.example
-env/
+
+# Database dumps and backups
+*.sql
+*.dump
+*.bak
+database/backups/*
+!database/backups/.gitkeep
+
+.scannerwork/
+coverage.xml
+htmlcov/
+.coverage
+.coverage.*
